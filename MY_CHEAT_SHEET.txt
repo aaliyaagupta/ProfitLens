@@ -1,0 +1,235 @@
+# ProfitLens — My Personal Cheat Sheet
+# Read this before any interview. This explains every part of the notebook in plain English.
+
+=============================================================
+SECTION 1 — IMPORTS
+=============================================================
+
+import pandas as pd
+→ pandas is what I used to load and work with the CSV file.
+  It gives me a "dataframe" — basically an Excel sheet inside Python.
+
+import numpy as np
+→ numpy is for math. I used it to calculate profit margin (division).
+
+import matplotlib.pyplot as plt
+→ this is for drawing charts/graphs.
+
+import seaborn as sns
+→ seaborn makes matplotlib charts look nicer with less code.
+
+from prophet import Prophet
+→ Prophet is Meta's library for forecasting. I used it to predict the next 30 days of profit.
+
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+→ these two functions measure how accurate my forecast was.
+  MAE = on average, how many dollars off was my prediction?
+  RMSE = same idea but punishes big errors more.
+
+
+=============================================================
+SECTION 2 — LOADING DATA
+=============================================================
+
+df = pd.read_csv('../data/Sample - Superstore.csv', encoding='latin-1')
+→ reads the CSV file into a dataframe called df.
+  encoding='latin-1' is needed because the file has some special characters.
+
+df.shape
+→ tells me (rows, columns). I used this to confirm I had 9,994 rows — "10,000+ transactions".
+
+df.columns.tolist()
+→ just prints all column names so I know what I'm working with.
+
+df.dtypes
+→ shows me what type each column is — number, text, date, etc.
+  Important because Order Date loads as text and needs to be converted.
+
+
+=============================================================
+SECTION 3 — CLEANING
+=============================================================
+
+df.isnull().sum()
+→ checks every column for missing values.
+  If a number is 0, that column is clean.
+
+df.duplicated().sum()
+→ counts how many rows are exact copies of another row.
+
+df = df.drop_duplicates()
+→ removes those duplicate rows.
+
+df['Order Date'] = pd.to_datetime(df['Order Date'])
+→ converts the Order Date column from plain text ("01/03/2015")
+  to an actual date that Python understands.
+  Without this, I can't do any time-based analysis.
+
+df['Year']  = df['Order Date'].dt.year
+df['Month'] = df['Order Date'].dt.month
+→ I pulled out year and month as separate columns.
+  This makes it easy to group data by month or year later.
+
+
+=============================================================
+SECTION 4 — REGIONAL PROFITABILITY
+=============================================================
+
+region_profit = df.groupby('Region')['Profit'].sum()
+→ groupby = "for each unique value in Region..."
+  ['Profit'].sum() = "...add up all the profit"
+  Result: one total profit number per region.
+
+region_profit.sort_values(ascending=False)
+→ sorts from highest to lowest profit so I can see the ranking.
+
+region_cat = df.groupby(['Region', 'Category'])['Profit'].sum().reset_index()
+→ same idea but grouped by BOTH region and category together.
+  reset_index() just converts it back to a normal flat table.
+
+WHY I DID THIS:
+→ I wanted to know which regions the business should focus on,
+  and whether the answer changes depending on product category.
+
+
+=============================================================
+SECTION 5 — DISCOUNT IMPACT
+=============================================================
+
+df['Profit Margin'] = (df['Profit'] / df['Sales']) * 100
+→ profit margin = what % of the sale price did we actually keep as profit?
+  Example: sold for $100, profit was $20 → margin = 20%
+
+bins   = [-0.01, 0, 0.2, 0.4, 1.0]
+labels = ['No Discount', 'Low', 'Medium', 'High']
+df['Discount Group'] = pd.cut(df['Discount'], bins=bins, labels=labels)
+→ pd.cut() puts each order into a "bucket" based on discount amount.
+  0 discount → "No Discount"
+  0 to 0.2   → "Low (0-20%)"
+  0.2 to 0.4 → "Medium"
+  0.4+       → "High"
+
+discount_effect = df.groupby('Discount Group')['Profit Margin'].mean()
+→ for each discount bucket, what's the AVERAGE profit margin?
+  This tells me: as discounts go up, does margin go down?
+
+plt.axhline(0, ...)
+→ draws a horizontal line at zero. Bars below this line = negative profit (we lost money).
+
+WHY I DID THIS:
+→ My resume says "discount impact on margins" — this is the analysis that proves it.
+  The finding: orders with 40%+ discounts have negative margins on average.
+
+
+=============================================================
+SECTION 6 — FORECASTING WITH PROPHET
+=============================================================
+
+daily = df.groupby('Order Date')['Profit'].sum().reset_index()
+→ adds up all profit for each individual day.
+  If 5 orders came in on Jan 3rd, their profits get summed into one number.
+
+daily = daily.rename(columns={'Order Date': 'ds', 'Profit': 'y'})
+→ Prophet requires the date column to be called 'ds' and the value column 'y'.
+  So I just renamed them.
+
+cutoff = daily['ds'].max() - pd.Timedelta(days=30)
+→ finds the last date in the data, then goes back 30 days.
+  Everything before cutoff = training data (teach Prophet)
+  Everything after  cutoff = test data (check Prophet's accuracy)
+
+model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+→ yearly_seasonality=True  → learn patterns that repeat every year (e.g. December spike)
+  weekly_seasonality=True  → learn patterns that repeat every week (e.g. Monday dip)
+  daily_seasonality=False  → not useful here since data is already daily totals
+
+model.fit(train)
+→ this is where Prophet actually learns from the data.
+  It looks at all the training dates + profit values and finds patterns.
+
+future = model.make_future_dataframe(periods=30)
+→ creates a list of future dates (30 days beyond the last training date).
+  Prophet needs this to know what dates to predict.
+
+forecast = model.predict(future)
+→ generates the actual predictions.
+  The output has columns:
+  - yhat       = predicted profit
+  - yhat_lower = lower end of confidence range
+  - yhat_upper = upper end of confidence range
+
+model.plot(forecast)
+→ Prophet's built-in chart. Shows actual data + predictions + uncertainty band.
+
+model.plot_components(forecast)
+→ breaks down WHAT Prophet learned:
+  - overall trend (is profit growing or shrinking?)
+  - weekly pattern (which day is best?)
+  - yearly pattern (which month is best?)
+
+eval_df = test.merge(forecast[['ds', 'yhat']], on='ds', how='left')
+→ joins the real test values with Prophet's predictions on the same dates.
+  So I can compare: what actually happened vs what Prophet guessed.
+
+mean_absolute_error(eval_df['y'], eval_df['yhat'])
+→ MAE = average of |actual - predicted| across all 30 days.
+  If MAE = $150, it means on average my forecast was $150 off per day.
+
+np.sqrt(mean_squared_error(...))
+→ RMSE = similar to MAE but squares the errors first, then takes root.
+  Bigger errors get penalised more. A higher RMSE vs MAE means there were some really bad days.
+
+
+=============================================================
+COMMON INTERVIEW QUESTIONS — YOUR ANSWERS
+=============================================================
+
+Q: Why did you use Prophet instead of XGBoost?
+A: "XGBoost is great for classification and regression but it doesn't natively
+   understand time. To use it for forecasting I'd have to manually create lag
+   features — like yesterday's profit, last week's profit — and engineer all
+   the time patterns myself. Prophet is built specifically for this kind of
+   business time-series data. It automatically detects weekly and yearly
+   seasonality, which made it a better fit for this project."
+
+Q: What is seasonality?
+A: "Seasonality means patterns that repeat over time. In retail, profit tends
+   to spike every December because of holidays, and dip in January. That's
+   yearly seasonality. Prophet detects this automatically from the historical data."
+
+Q: What does MAE tell you?
+A: "MAE is Mean Absolute Error. It tells me on average how many dollars off
+   my forecast was per day. If MAE is $200, it means the model's daily
+   prediction was off by $200 on average. Lower is better."
+
+Q: Why did you calculate profit margin instead of just using profit?
+A: "Profit alone doesn't tell the full story. A $500 profit on a $10,000 sale
+   is very different from a $500 profit on a $600 sale. Margin gives you the
+   percentage — how efficiently you're making money relative to sales."
+
+Q: What did you find about discounts?
+A: "Orders with discounts above 40% had negative profit margins on average —
+   meaning the business was losing money on those orders. The scatter plot
+   made this very clear. It suggests the discount strategy needs to be revisited
+   for high-discount orders."
+
+Q: How big is the dataset?
+A: "Around 9,994 rows — roughly 10,000 transactions — covering January 2015
+   to December 2018. That's 4 years of daily sales data across 4 US regions
+   and 3 product categories."
+
+Q: Why groupby?
+A: "groupby lets me aggregate data — for example, instead of looking at
+   10,000 individual orders, I can collapse them into totals per region,
+   or averages per discount group. It's one of the most used functions in
+   pandas for any kind of summary analysis."
+
+
+
+
+## Summary
+
+- West region had the highest total profit
+- Orders with 40%+ discounts had negative profit margins on average
+- Prophet successfully learned seasonal patterns and forecasted the last 30 days
+- MAE and RMSE tell us on average how far off the predictions were
